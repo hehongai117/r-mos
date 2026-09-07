@@ -111,7 +111,10 @@ class ProjectGenerator:
         # Stage 1: 检索知识库
         yield {"status": ProjectStatus.RETRIEVING_KNOWLEDGE, "message": "检索知识库中..."}
 
-        knowledge_results = await self._retrieve_knowledge(intent)
+        knowledge_results = await self._retrieve_knowledge(
+            intent,
+            viewer_user_id=user_id,
+        )
 
         if not knowledge_results or len(knowledge_results) < 5:
             yield {
@@ -134,7 +137,12 @@ class ProjectGenerator:
         # Stage 4: 完成
         yield {"status": ProjectStatus.COMPLETED, "message": "完成", "project": project}
 
-    async def _retrieve_knowledge(self, intent: Any) -> list[dict]:
+    async def _retrieve_knowledge(
+        self,
+        intent: Any,
+        *,
+        viewer_user_id: int | None = None,
+    ) -> list[dict]:
         """UF-04-a-2: 知识库检索"""
         query = self._build_retrieval_query(intent)
         query_embedding: Optional[list[float]] = None
@@ -152,6 +160,7 @@ class ProjectGenerator:
                 top_k=10,
                 filters={"brand": intent.brand, "model": intent.model},
                 allow_degraded=True,
+                viewer_user_id=viewer_user_id,
             )
             normalized: list[dict] = []
             for item in results:

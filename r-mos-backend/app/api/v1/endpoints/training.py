@@ -2,7 +2,7 @@
 UF-04, UF-06: Training API Endpoints
 训练项目与会话管理接口
 """
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
@@ -12,13 +12,20 @@ from app.core.database import get_db
 from app.models.audit_event import AuditEvent
 from app.models.training import TrainingSession
 from app.services.access_control import raise_read_access_denied
-from app.services.authz_guard import ActorContext, get_current_actor, resolve_actor_identity
-from app.services.ownership import ensure_write_owner
-from app.services.ownership import ensure_user_scope
+from app.services.authz_guard import (
+    ActorContext,
+    actor_has_role,
+    get_current_actor,
+    resolve_actor_identity,
+)
+from app.services.ownership import (
+    ensure_teacher_scope_over_student,
+    ensure_user_scope,
+    ensure_write_owner,
+)
 from app.services.training.session_service import SessionService
 from app.services.training.submission_service import SubmissionService
 from app.services.training.feedback_generator import FeedbackGenerator, FeedbackRole
-from app.services.teaching.class_membership import ClassMembershipService
 from app.services.memory.skill_profile_service import SkillProfileService
 from app.models.training_submission import TrainingSubmission
 from app.schemas.training_workbench import (
@@ -91,7 +98,9 @@ async def create_session(
 )
 async def get_session(
     session_id: str,
-    db: AsyncSession = Depends(get_db)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_current_actor),
 ):
     """UF-06-b-3: 获取会话状态"""
     service = SessionService(db)
@@ -99,6 +108,16 @@ async def get_session(
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    await ensure_user_scope(
+        db,
+        request,
+        actor,
+        session.user_id,
+        action="read_training_session",
+        resource_type="training_session",
+        resource_id=session_id,
+    )
 
     return SessionResponse(
         session_id=session.session_id,
@@ -371,6 +390,7 @@ async def submit_session(
 async def force_submit_session(
     session_id: str,
     request: ForceSubmitSessionRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
     actor: ActorContext = Depends(get_current_actor),
 ):
@@ -380,19 +400,31 @@ async def force_submit_session(
     if not training_session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 审计 M-02：此前管辖权校验的输入是请求体自带的 teacher_id，
-    # 且该编号被写入审计事件作为操作人——有检查，但检查的是调用方自己提供的身份。
+    snapshot = (
+        training_session.project_snapshot
+        if isinstance(training_session.project_snapshot, dict)
+        else {}
+    )
+    raw_class_id = snapshot.get("class_id")
+    # G-AUTH-02：训练会话没有独立 class_id 列；只有快照显式携带时才能推出所属班级。
+    # 缺失或无效时传入不可能存在的班级，教师默认拒绝；管理员仍由统一守卫放行。
+    class_id = raw_class_id if type(raw_class_id) is int and raw_class_id > 0 else 0
+    await ensure_teacher_scope_over_student(
+        db,
+        http_request,
+        actor,
+        training_session.user_id,
+        action="force_submit_training_session",
+        resource_type="TrainingSession",
+        resource_id=session_id,
+        class_id=class_id,
+    )
+
+    # 审计 M-02：操作人只取认证上下文；请求体字段仅作兼容一致性校验。
     teacher_id = resolve_actor_identity(
         actor, request.teacher_id, action="force_submit_training_session",
         resource_type="TrainingSession", resource_id=session_id,
     )
-    membership_service = ClassMembershipService(db)
-    has_scope = await membership_service.teacher_has_student_scope(
-        teacher_id=teacher_id,
-        student_id=training_session.user_id,
-    )
-    if not has_scope:
-        raise HTTPException(status_code=403, detail="Teacher has no scope for this student")
 
     submission_service = SubmissionService(db)
     submission = await submission_service.submit_by_teacher(
@@ -469,7 +501,9 @@ async def update_step(
 )
 async def get_step_records(
     session_id: str,
-    db: AsyncSession = Depends(get_db)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_current_actor),
 ):
     """UF-06-b-3: 获取步骤记录列表"""
     service = SessionService(db)
@@ -478,6 +512,16 @@ async def get_step_records(
     if not result:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    session = result["session"]
+    await ensure_user_scope(
+        db,
+        request,
+        actor,
+        session.user_id,
+        action="read_training_steps",
+        resource_type="training_session",
+        resource_id=session_id,
+    )
     steps = result["steps"]
     return [
         StepRecordResponse(
@@ -549,9 +593,20 @@ async def get_user_sessions(
 )
 async def get_active_session(
     user_id: int,
-    db: AsyncSession = Depends(get_db)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_current_actor),
 ):
     """获取用户当前活跃会话（用于断点续训）"""
+    await ensure_user_scope(
+        db,
+        request,
+        actor,
+        user_id,
+        action="read_active_training_session",
+        resource_type="user",
+        resource_id=user_id,
+    )
     service = SessionService(db)
     session = await service.get_user_active_session(user_id)
 
@@ -582,7 +637,6 @@ async def get_active_session(
 async def get_training_feedback(
     session_id: str,
     request: Request,
-    role: str = Query(default="student", pattern="^(student|teacher)$"),
     db: AsyncSession = Depends(get_db),
     actor: ActorContext = Depends(get_current_actor),
 ):
@@ -625,7 +679,11 @@ async def get_training_feedback(
         feedback_generator = FeedbackGenerator(db)
         feedback = await feedback_generator.generate(
             submission_id=submission.submission_id,
-            role=FeedbackRole.TEACHER if role == "teacher" else FeedbackRole.STUDENT,
+            role=(
+                FeedbackRole.TEACHER
+                if actor_has_role(actor, "teacher", "admin")
+                else FeedbackRole.STUDENT
+            ),
         )
         payload = {
             "overall_score": feedback.overall_score,
@@ -686,7 +744,24 @@ async def get_student_skill_profile(
         resource_type="user",
     )
     service = SkillProfileService(db)
-    profile = await service.get_or_create_profile(user_id)
+    profile = await service.get_profile(user_id)
+
+    if profile is None:
+        return SkillProfileResponse(
+            user_id=user_id,
+            overall_level=1,
+            total_sessions=0,
+            total_duration=0,
+            last_trained_at=None,
+            score_safety=None,
+            score_procedure=None,
+            score_precision=None,
+            score_efficiency=None,
+            score_tools=None,
+            cert_l1_passed=False,
+            cert_l2_passed=False,
+            cert_l3_eligible=False,
+        )
 
     return SkillProfileResponse(
         user_id=profile.user_id,

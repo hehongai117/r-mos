@@ -22,6 +22,7 @@ from app.models.training import TrainingSession
 from app.models.conversation import ConversationTurn
 from app.services.memory import SkillProfileService
 from app.services.memory.hub import MemoryHub
+from app.services.training.evidence_validation import is_valid_training_step_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +63,29 @@ class TrainingMemoryWriter:
             payload = submission.payload
             user_id = submission.user_id
             steps_summary = payload.get("steps_summary", [])
+            profile_steps = []
+            for step in steps_summary:
+                if step.get("status") != "pass":
+                    profile_steps.append(step)
+                    continue
+                evidence = step.get("evidence") or {}
+                if await is_valid_training_step_evidence(
+                    self.db,
+                    bundle_id=evidence.get("bundle_id"),
+                    user_id=user_id,
+                    session_id=submission.session_id,
+                    step_id=str(step.get("step_id") or ""),
+                ):
+                    profile_steps.append(step)
 
             # Step 1: 薄弱点更新 (优先级最高)
-            await self._update_weak_steps(user_id, steps_summary)
+            await self._update_weak_steps(user_id, profile_steps)
 
-            # Step 2: 技能画像更新
-            skill_service = SkillProfileService(self.db)
-            await skill_service.update_scores(user_id, payload)
+            # Step 2: 技能画像只接收带证据的通过结果；纯客户端自报不得创建画像。
+            if profile_steps:
+                skill_service = SkillProfileService(self.db)
+                profile_payload = {**payload, "steps_summary": profile_steps}
+                await skill_service.update_scores(user_id, profile_payload)
 
             # Step 3: 训练历史写入
             await self._update_training_history(submission)

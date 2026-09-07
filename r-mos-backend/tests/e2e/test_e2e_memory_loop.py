@@ -74,13 +74,16 @@ def test_e2e_memory_loop(
     assert weak_steps_resp.status_code == 200
     weak_step_map = {item["step_id"]: item for item in weak_steps_resp.json()}
 
-    assert weak_step_map["step-A"]["fail_count"] == 2
+    # 无证据的客户端自报 pass 不再写入或消解画像/薄弱点事实。
+    assert "step-A" not in weak_step_map
     assert weak_step_map["step-B"]["fail_count"] == 1
     assert weak_step_map["step-B"]["is_resolved"] is False
 
     captured_prompt: dict[str, str] = {}
 
-    async def _fake_retrieve_knowledge(self, intent):  # noqa: ANN001
+    async def _fake_retrieve_knowledge(  # noqa: ANN001
+        self, intent, *, viewer_user_id=None
+    ):
         return [{"title": f"doc-{i}", "content": "knowledge"} for i in range(6)]
 
     async def _fake_chat(**kwargs):  # noqa: ANN001

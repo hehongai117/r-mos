@@ -73,7 +73,11 @@ def test_e2e_teacher_flow(
         json={
             "user_id": student_id,
             "project_id": "proj-teacher-flow",
-            "project_snapshot": {"estimated_time": 20, "steps": ["step-1"]},
+            "project_snapshot": {
+                "class_id": class_id,
+                "estimated_time": 20,
+                "steps": ["step-1"],
+            },
         },
     )
     assert session_resp.status_code == 200
@@ -110,7 +114,10 @@ def test_e2e_teacher_flow(
     assert notify_event is not None
     assert notify_event.reason == "teacher_force_submit"
 
-    feedback_resp = client.get(f"/api/v1/training/feedback/{session_id}?role=teacher")
+    feedback_resp = client.get(
+        f"/api/v1/training/feedback/{session_id}?role=student",
+        headers={"Authorization": f"Bearer {teacher_login['access_token']}"},
+    )
     assert feedback_resp.status_code == 200
     feedback_payload = feedback_resp.json()
     assert feedback_payload["teaching_diagnosis"]

@@ -21,13 +21,15 @@ from sqlalchemy.pool import StaticPool
 import app.models as app_models  # noqa: F401  # ensure metadata is fully loaded
 from app.core.database import get_db
 from app.models.base import Base
-from app.models.evidence import EvidenceBundle
+from app.models.evidence import EvidenceBundle, EvidenceItem
+from app.models.knowledge_chunk import AIKnowledgeChunk
 from app.models.school import School
 from app.models.skill_profile import StudentSkillProfile, StudentWeakStep
 from app.models.teaching import Enrollment, TeachingClass
 from app.models.training import SessionStepRecord, TrainingSession
 from app.models.training_submission import TrainingSubmission
 from app.services.memory.hub import MemoryHub
+from app.services.knowledge.hub import KnowledgeHub
 from app.services.training.project_generator import ProjectGenerator
 from main import app
 
@@ -234,6 +236,50 @@ async def _seed_training_bundle(
     }
 
 
+async def _seed_training_evidence(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: int,
+    session_id: str,
+    step_id: str,
+) -> str:
+    bundle_id = str(uuid4())
+    item_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        session.add(
+            EvidenceBundle(
+                id=bundle_id,
+                bundle_type="media",
+                bundle_hash=uuid4().hex + uuid4().hex,
+                observed_time_start=now,
+                ingest_time=now,
+                is_sealed=True,
+                sealed_at=now,
+                created_by_user_id=user_id,
+                machine_tags=["training-workbench", session_id, step_id],
+            )
+        )
+        session.add(
+            EvidenceItem(
+                id=item_id,
+                bundle_id=bundle_id,
+                evidence_type="media",
+                content_uri=f"local://training-evidence/{session_id}/{item_id}",
+                content_hash=uuid4().hex + uuid4().hex,
+                content_hash_algo="sha256",
+                content_mime_type="image/jpeg",
+                size_bytes=4,
+                observed_time=now,
+                ingest_time=now,
+                machine_code=step_id,
+                machine_tags=[session_id, step_id],
+            )
+        )
+        await session.commit()
+    return bundle_id
+
+
 def test_module_g_route_census_uses_runtime_app() -> None:
     """从运行时应用枚举，锁定模块 G 当前注册的 20 条方法与路径组合。"""
     actual: set[tuple[str, str]] = set()
@@ -325,10 +371,10 @@ def test_same_school_teacher_is_allowed_by_scoped_reads(
 
 
 @pytest.mark.parametrize("kind", ("session", "steps", "active-session"))
-def test_unscoped_reads_leak_cross_school_current_behavior(
+def test_cross_school_teacher_is_rejected_by_all_training_reads(
     module_g_env: dict, kind: str
 ) -> None:
-    """这是当前行为，疑似缺陷 G-AUTH-01：三条读取路由未做归属校验，待模块 G 改造时处置。"""
+    """G-AUTH-01：会话、步骤与断点续训读取全部执行同一归属口径。"""
     fresh_student_id, _ = _register_and_login(
         module_g_env["client"],
         email_prefix=f"module_g_leak_{kind}",
@@ -350,6 +396,36 @@ def test_unscoped_reads_leak_cross_school_current_behavior(
     }
     response = module_g_env["client"].get(
         paths[kind], headers=_auth(module_g_env["foreign_teacher_token"])
+    )
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize("kind", ("session", "steps", "active-session"))
+def test_same_school_teacher_is_allowed_by_all_training_reads(
+    module_g_env: dict, kind: str
+) -> None:
+    """G-AUTH-01 放行侧：同校教师读取学生训练数据是既定设计。"""
+    fresh_student_id, _ = _register_and_login(
+        module_g_env["client"],
+        email_prefix=f"module_g_same_school_{kind}",
+        school_name=TEST_SCHOOL_NAME,
+        role="student",
+        teacher_id=module_g_env["owner_teacher_id"],
+    )
+    seeded = asyncio.run(
+        _seed_training_bundle(
+            module_g_env["session_factory"], user_id=fresh_student_id
+        )
+    )
+    paths = {
+        "session": f"/api/v1/training/sessions/{seeded['session_id']}",
+        "steps": f"/api/v1/training/sessions/{seeded['session_id']}/steps",
+        "active-session": (
+            f"/api/v1/training/users/{fresh_student_id}/active-session"
+        ),
+    }
+    response = module_g_env["client"].get(
+        paths[kind], headers=_auth(module_g_env["peer_teacher_token"])
     )
     assert response.status_code == 200, response.text
     if kind == "steps":
@@ -555,10 +631,13 @@ def test_update_step_missing_session_returns_404(module_g_env: dict) -> None:
     assert response.status_code == 404, response.text
 
 
-def test_fake_evidence_bundle_marks_step_pass_current_behavior(
-    module_g_env: dict, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("invalid_kind", ("missing", "other-user", "other-session"))
+def test_invalid_evidence_bundle_cannot_mark_step_pass(
+    module_g_env: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_kind: str,
 ) -> None:
-    """这是当前行为，疑似缺陷 G-EVID-01：任意非空证据编号可判步骤通过，待模块 G 改造时处置。"""
+    """G-EVID-01：不存在、他人所有或其他会话的证据都不能判步骤通过。"""
     from app.services.training.workbench_execution_service import (
         TrainingWorkbenchExecutionService,
     )
@@ -578,7 +657,25 @@ def test_fake_evidence_bundle_marks_step_pass_current_behavior(
             with_submission=False,
         )
     )
-    fake_bundle_id = f"does-not-exist-{uuid4()}"
+    if invalid_kind == "missing":
+        invalid_bundle_id = f"does-not-exist-{uuid4()}"
+    else:
+        invalid_bundle_id = asyncio.run(
+            _seed_training_evidence(
+                module_g_env["session_factory"],
+                user_id=(
+                    module_g_env["foreign_teacher_id"]
+                    if invalid_kind == "other-user"
+                    else module_g_env["student_id"]
+                ),
+                session_id=(
+                    f"other-session-{uuid4()}"
+                    if invalid_kind == "other-session"
+                    else seeded["session_id"]
+                ),
+                step_id=seeded["step_id"],
+            )
+        )
     response = module_g_env["client"].post(
         (
             f"/api/v1/training/workbench/sessions/{seeded['session_id']}"
@@ -587,23 +684,83 @@ def test_fake_evidence_bundle_marks_step_pass_current_behavior(
         headers=_auth(module_g_env["student_token"]),
         json={
             "step_index": 0,
-            "evidence_bundle_id": fake_bundle_id,
+            "evidence_bundle_id": invalid_bundle_id,
             "tools_confirmed": [],
         },
     )
     assert response.status_code == 200, response.text
+    assert response.json()["status"] == "fail"
+    assert response.json()["verdict"]["result"] == "FAIL"
+    assert response.json()["evidence_bundle_id"] is None
+
+
+def test_valid_owned_session_evidence_marks_pass_and_updates_profile(
+    module_g_env: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-EVID-01/G-DATA-02 放行侧：真实归属证据可判通过并进入画像。"""
+    from app.services.training.workbench_execution_service import (
+        TrainingWorkbenchExecutionService,
+    )
+
+    async def _fake_explanation(self, **kwargs):  # noqa: ANN001
+        return "证据归属有效"
+
+    monkeypatch.setattr(
+        TrainingWorkbenchExecutionService,
+        "_generate_verdict_explanation",
+        _fake_explanation,
+    )
+    student_id, student_token = _register_and_login(
+        module_g_env["client"],
+        email_prefix="module_g_verified_profile",
+        school_name=TEST_SCHOOL_NAME,
+        role="student",
+        teacher_id=module_g_env["owner_teacher_id"],
+    )
+    seeded = asyncio.run(
+        _seed_training_bundle(
+            module_g_env["session_factory"],
+            user_id=student_id,
+            with_submission=False,
+        )
+    )
+    bundle_id = asyncio.run(
+        _seed_training_evidence(
+            module_g_env["session_factory"],
+            user_id=student_id,
+            session_id=seeded["session_id"],
+            step_id=seeded["step_id"],
+        )
+    )
+    response = module_g_env["client"].post(
+        (
+            f"/api/v1/training/workbench/sessions/{seeded['session_id']}"
+            f"/steps/{seeded['step_id']}/submit"
+        ),
+        headers=_auth(student_token),
+        json={"step_index": 0, "evidence_bundle_id": bundle_id},
+    )
+    assert response.status_code == 200, response.text
     assert response.json()["status"] == "pass"
-    assert response.json()["evidence_bundle_id"] == fake_bundle_id
+    assert response.json()["evidence_bundle_id"] == bundle_id
 
-    async def _evidence_still_missing() -> bool:
+    async def _load_profile() -> StudentSkillProfile | None:
         async with module_g_env["session_factory"]() as session:
-            return await session.get(EvidenceBundle, fake_bundle_id) is None
+            result = await session.execute(
+                select(StudentSkillProfile).where(
+                    StudentSkillProfile.user_id == student_id
+                )
+            )
+            return result.scalar_one_or_none()
 
-    assert asyncio.run(_evidence_still_missing()) is True
+    profile = asyncio.run(_load_profile())
+    assert profile is not None
+    assert profile.total_sessions == 1
+    assert float(profile.score_procedure) == 100.0
 
 
-def test_force_submit_uses_any_class_scope_current_behavior(module_g_env: dict) -> None:
-    """这是当前行为，疑似缺陷 G-AUTH-02：force-submit 只问教师是否在任一班教过学生，待模块 G 改造时处置。"""
+def test_force_submit_is_scoped_to_training_sessions_class(module_g_env: dict) -> None:
+    """G-AUTH-02：教师职权绑定会话所属班级，学生本人仍不得强制提交。"""
     async def _seed_classes_and_session() -> str:
         async with module_g_env["session_factory"]() as session:
             teacher_a_class = TeachingClass(
@@ -656,14 +813,59 @@ def test_force_submit_uses_any_class_scope_current_behavior(module_g_env: dict) 
         headers=_auth(module_g_env["owner_teacher_token"]),
         json={},
     )
-    assert unrelated_teacher.status_code == 200, unrelated_teacher.text
-    assert unrelated_teacher.json()["submit_type"] == "teacher"
+    assert unrelated_teacher.status_code == 403, unrelated_teacher.text
+
+    owning_teacher = module_g_env["client"].post(
+        f"/api/v1/training/sessions/{session_id}/force-submit",
+        headers=_auth(module_g_env["peer_teacher_token"]),
+        json={},
+    )
+    assert owning_teacher.status_code == 200, owning_teacher.text
+    assert owning_teacher.json()["submit_type"] == "teacher"
 
 
-def test_feedback_role_query_grants_teacher_view_current_behavior(
+def test_force_submit_rejects_teacher_when_session_has_no_class(
+    module_g_env: dict,
+) -> None:
+    """G-AUTH-02：会话无法推出班级时，不退回“教过该学生即可”。"""
+    async def _seed_teacher_scope_and_unscoped_session() -> str:
+        async with module_g_env["session_factory"]() as session:
+            teaching_class = TeachingClass(
+                name=f"无会话班级-{uuid4().hex[:6]}",
+                teacher_id=module_g_env["owner_teacher_id"],
+            )
+            session.add(teaching_class)
+            await session.flush()
+            session.add(
+                Enrollment(
+                    class_id=teaching_class.id,
+                    student_id=module_g_env["student_id"],
+                )
+            )
+            training_session = TrainingSession(
+                session_id=str(uuid4()),
+                project_id=str(uuid4()),
+                user_id=module_g_env["student_id"],
+                status="active",
+                project_snapshot={"steps": [], "estimated_time": 30},
+            )
+            session.add(training_session)
+            await session.commit()
+            return training_session.session_id
+
+    session_id = asyncio.run(_seed_teacher_scope_and_unscoped_session())
+    response = module_g_env["client"].post(
+        f"/api/v1/training/sessions/{session_id}/force-submit",
+        headers=_auth(module_g_env["owner_teacher_token"]),
+        json={},
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_feedback_view_is_derived_from_token_role(
     module_g_env: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """这是当前行为，疑似缺陷 G-AUTH-03：学生可用 role=teacher 切换教师反馈视角，待模块 G 改造时处置。"""
+    """G-AUTH-03：学生不能升级视角，教师也不能用参数降级令牌身份。"""
     seeded = asyncio.run(
         _seed_training_bundle(
             module_g_env["session_factory"], user_id=module_g_env["student_id"]
@@ -697,20 +899,28 @@ def test_feedback_role_query_grants_teacher_view_current_behavior(
     monkeypatch.setattr(
         "app.api.v1.endpoints.training.FeedbackGenerator.generate", _fake_generate
     )
-    response = module_g_env["client"].get(
+    student_response = module_g_env["client"].get(
         f"/api/v1/training/feedback/{seeded['session_id']}?role=teacher",
         headers=_auth(module_g_env["student_token"]),
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["teaching_diagnosis"] == "教师专属诊断"
-    assert response.json()["ranking_percentile"] == 90.0
+    assert student_response.status_code == 200, student_response.text
+    assert student_response.json()["teaching_diagnosis"] is None
+    assert student_response.json()["ranking_percentile"] is None
+
+    teacher_response = module_g_env["client"].get(
+        f"/api/v1/training/feedback/{seeded['session_id']}?role=student",
+        headers=_auth(module_g_env["peer_teacher_token"]),
+    )
+    assert teacher_response.status_code == 200, teacher_response.text
+    assert teacher_response.json()["teaching_diagnosis"] == "教师专属诊断"
+    assert teacher_response.json()["ranking_percentile"] == 90.0
 
 
-def test_profile_get_creates_row_but_direct_profile_write_is_absent(
+def test_profile_get_returns_empty_view_without_creating_row(
     module_g_env: dict,
 ) -> None:
-    """这是当前行为，疑似缺陷 G-DATA-01：GET 会创建画像；没有直接画像写接口，待模块 G 改造时处置。"""
-    async def _delete_and_count() -> int:
+    """G-DATA-01：首次读取保持前端 200 契约，但不产生数据库写入。"""
+    async def _delete_profile() -> None:
         async with module_g_env["session_factory"]() as session:
             result = await session.execute(
                 select(StudentSkillProfile).where(
@@ -721,9 +931,17 @@ def test_profile_get_creates_row_but_direct_profile_write_is_absent(
             if profile is not None:
                 await session.delete(profile)
                 await session.commit()
-            return 0
 
-    asyncio.run(_delete_and_count())
+    async def _profile_exists() -> bool:
+        async with module_g_env["session_factory"]() as session:
+            result = await session.execute(
+                select(StudentSkillProfile).where(
+                    StudentSkillProfile.user_id == module_g_env["student_id"]
+                )
+            )
+            return result.scalar_one_or_none() is not None
+
+    asyncio.run(_delete_profile())
     read = module_g_env["client"].get(
         f"/api/v1/students/{module_g_env['student_id']}/profile",
         headers=_auth(module_g_env["student_token"]),
@@ -737,19 +955,27 @@ def test_profile_get_creates_row_but_direct_profile_write_is_absent(
         json={"overall_level": 5, "score_safety": 100},
     )
     assert direct_write.status_code == 405
+    assert asyncio.run(_profile_exists()) is False
 
 
-def test_student_self_report_updates_skill_profile_current_behavior(
+def test_student_self_report_without_evidence_does_not_create_skill_profile(
     module_g_env: dict,
 ) -> None:
-    """这是当前行为，疑似缺陷 G-DATA-02：学生自报 pass 且无证据也会写入技能画像，待模块 G 改造时处置。"""
+    """G-DATA-02：无证据的客户端自报通过不得成为画像事实。"""
     client = module_g_env["client"]
-    headers = _auth(module_g_env["student_token"])
+    student_id, student_token = _register_and_login(
+        client,
+        email_prefix="module_g_unverified_profile",
+        school_name=TEST_SCHOOL_NAME,
+        role="student",
+        teacher_id=module_g_env["owner_teacher_id"],
+    )
+    headers = _auth(student_token)
     created = client.post(
         "/api/v1/training/sessions",
         headers=headers,
         json={
-            "user_id": module_g_env["student_id"],
+            "user_id": student_id,
             "project_id": str(uuid4()),
             "project_snapshot": {"estimated_time": 30, "steps": []},
         },
@@ -775,51 +1001,89 @@ def test_student_self_report_updates_skill_profile_current_behavior(
     )
     assert submitted.status_code == 200, submitted.text
 
-    async def _load_profile() -> StudentSkillProfile:
+    async def _load_profile() -> StudentSkillProfile | None:
         async with module_g_env["session_factory"]() as session:
             result = await session.execute(
                 select(StudentSkillProfile).where(
-                    StudentSkillProfile.user_id == module_g_env["student_id"]
+                    StudentSkillProfile.user_id == student_id
                 )
             )
-            return result.scalar_one()
+            return result.scalar_one_or_none()
 
     profile = asyncio.run(_load_profile())
-    assert profile.total_sessions >= 1
-    assert float(profile.score_procedure) == 100.0
+    assert profile is None
 
 
-def test_project_generator_omits_knowledge_viewer_current_behavior(
+def test_project_generator_retrieves_same_school_private_knowledge(
+    module_g_env: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """这是当前行为，疑似缺陷 G-KNOW-01：走统一知识入口但未传当前用户，校内私有知识被排除，待模块 G 改造时处置。"""
-    captured: dict = {}
+    """G-KNOW-01：训练生成器传入当前用户，同校私有知识可用、跨校仍隔离。"""
+    query = f"module-g-private-{uuid4().hex}"
+    same_title = f"same-school-{uuid4().hex}"
+    other_title = f"other-school-{uuid4().hex}"
 
-    class _FakeKnowledgeHub:
+    class _RecordingKnowledgeHub:
+        def __init__(self) -> None:
+            self.results = []
+
         async def search(self, **kwargs):
-            captured.update(kwargs)
-            return [{"title": "public", "content": "public", "score": 1.0}]
+            self.results = await KnowledgeHub().search(**kwargs)
+            return self.results
 
-    async def _no_embedding(query):  # noqa: ANN001
+    async def _no_embedding(_query):  # noqa: ANN001
         return None
 
     monkeypatch.setattr(
         "app.services.training.project_generator.query_embedding_service.embed_query",
         _no_embedding,
     )
-    generator = ProjectGenerator(SimpleNamespace())
-    generator.knowledge_hub = _FakeKnowledgeHub()
-    result = asyncio.run(
-        generator._retrieve_knowledge(
-            SimpleNamespace(brand="ATOM", model="01", focus_areas=[])
-        )
-    )
-    assert result[0]["title"] == "public"
-    assert "viewer_user_id" not in captured
+
+    async def _exercise() -> tuple[set[str], int | None]:
+        async with module_g_env["session_factory"]() as session:
+            session.add_all(
+                [
+                    AIKnowledgeChunk(
+                        source_type="manual",
+                        source_id=same_title,
+                        content=query,
+                        owner_user_id=str(module_g_env["peer_teacher_id"]),
+                    ),
+                    AIKnowledgeChunk(
+                        source_type="manual",
+                        source_id=other_title,
+                        content=query,
+                        owner_user_id=str(module_g_env["foreign_teacher_id"]),
+                    ),
+                ]
+            )
+            await session.commit()
+            recorder = _RecordingKnowledgeHub()
+            generator = ProjectGenerator(session)
+            generator.knowledge_hub = recorder
+            events = [
+                item
+                async for item in generator.generate(
+                    SimpleNamespace(
+                        category=query,
+                        brand=None,
+                        model=None,
+                        focus_areas=[],
+                    ),
+                    user_id=module_g_env["student_id"],
+                )
+            ]
+            assert events[-1]["status"].value == "error"
+            return {item.title for item in recorder.results}, len(recorder.results)
+
+    titles, result_count = asyncio.run(_exercise())
+    assert result_count >= 1
+    assert same_title in titles
+    assert other_title not in titles
 
 
-def test_short_term_fallback_is_not_user_scoped_current_behavior() -> None:
-    """这是当前行为，疑似缺陷 G-MEM-01：fallback 可向另一 user_id 返回同一会话业务数据，待模块 G 改造时处置。"""
+def test_short_term_fallback_is_isolated_by_user_id() -> None:
+    """G-MEM-01：同一会话编号下，另一用户不得读到内存降级数据。"""
     async def _exercise() -> tuple[list, list]:
         hub = MemoryHub()
         hub.short_term._client = None
@@ -838,4 +1102,4 @@ def test_short_term_fallback_is_not_user_scoped_current_behavior() -> None:
 
     owner_read, other_read = asyncio.run(_exercise())
     assert owner_read[0].data["student_id"] == "student-a"
-    assert other_read[0].data["student_id"] == "student-a"
+    assert other_read == []

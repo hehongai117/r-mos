@@ -25,7 +25,7 @@ async def test_project_generator_generate_success(monkeypatch, test_db):
     generator = ProjectGenerator(test_db)
     intent = _Intent()
 
-    async def fake_retrieve(_intent):
+    async def fake_retrieve(_intent, *, viewer_user_id=None):
         return [{"title": f"doc-{i}", "content": "ok"} for i in range(6)]
 
     async def fake_chat(**_kwargs):
@@ -84,7 +84,7 @@ async def test_project_generator_generate_knowledge_missing(monkeypatch, test_db
     generator = ProjectGenerator(test_db)
     intent = _Intent()
 
-    async def fake_retrieve(_intent):
+    async def fake_retrieve(_intent, *, viewer_user_id=None):
         return [{"title": "only-one", "content": "tiny"}]
 
     monkeypatch.setattr(generator, "_retrieve_knowledge", fake_retrieve)
@@ -103,7 +103,7 @@ async def test_project_generator_generate_fallback_when_llm_timeout(monkeypatch,
     generator = ProjectGenerator(test_db)
     intent = _Intent()
 
-    async def fake_retrieve(_intent):
+    async def fake_retrieve(_intent, *, viewer_user_id=None):
         return [{"title": f"doc-{i}", "content": "ok"} for i in range(6)]
 
     async def fake_chat(**_kwargs):

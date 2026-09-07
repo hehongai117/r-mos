@@ -10135,3 +10135,43 @@ A1 曾指出、主审又自犯一次的同一个坑）复查 92 个写端点，�
   - 最终 3 项失败固定为 `test_audit_query_indexes_exist`、`test_audit_trace_query_explain_uses_trace_index`、`test_skill_registry_migration_gate`，均在连接 `::1:5432` 时收到 `PermissionError: [Errno 1] Operation not permitted`
   - 回退分组：安全组回退可见性、机器人读取/列表与 onboarding 过滤；契约/审计组单独回退 onboarding 404、资产拒绝审计组合和上传响应路径。按任务要求未 commit、未 push
 - Next Step: 由董事会复核当前未提交差异；若需要 3 项 PostgreSQL 门禁全绿，在无沙箱限制环境用同一全量命令复跑。本记录不自行宣布模块 B 或 S3 阶段完成。
+
+## 2026-09-07 — RMOS-S3-007 模块 G 第二步九类缺陷处置
+
+- DateTime: 2026-09-07 08:46:10 +0800
+- Task: `RMOS-S3-007（模块 G 第二步）`；修复 G-AUTH-01/02/03、G-DATA-01/02、G-EVID-01、G-MEM-01、G-KNOW-01；G-DATA-03 只保留行为登记，未在本批实现。
+- Scope (files changed):
+  - 生产代码：`r-mos-backend/app/api/v1/endpoints/training.py`、`app/services/memory/{hub,training_memory_writer}.py`、`app/services/training/{evidence_validation,project_generator,workbench_execution_service}.py`
+  - 对应断言：`r-mos-backend/tests/e2e/test_{module_g_behavior,e2e_memory_loop,e2e_knowledge_missing,e2e_teacher_flow,module_h_behavior}.py`、`tests/unit/test_{project_generator,training_characterization,training_workbench_execution_api,api_teaching}.py`
+  - 证据：`docs/testing/TEST_REPORT.md`、`docs-archive/DEVELOPMENT_LOG.md`
+- Commands Run:
+  - 每次 pytest 均在本 worktree 的 `r-mos-backend` 下先执行：`set -a; . /Users/xuhehong/Desktop/r-mos/r-mos-backend/.env; set +a`、`unset CORS_ORIGINS`、`export DEBUG=true`
+  - 分组 RED/GREEN 与定向回归：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings <对应测试节点>`
+  - 组合回归：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings tests/e2e/test_module_g_behavior.py tests/e2e/test_e2e_memory_loop.py tests/e2e/test_e2e_knowledge_missing.py tests/unit/test_project_generator.py tests/unit/test_training_characterization.py tests/unit/test_training_workbench_execution_api.py`
+  - 模块 G 最终：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings tests/e2e/test_module_g_behavior.py`
+  - 全量：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings`（两次；未加 `-q`、未加 `--timeout`）
+  - 依赖：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python ../docs/governance/evidence/2026-09-05-layered-dependency-measure.py`
+  - `/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m compileall app/api/v1/endpoints/training.py app/services/memory/hub.py app/services/memory/training_memory_writer.py app/services/training/evidence_validation.py app/services/training/project_generator.py app/services/training/workbench_execution_service.py`
+  - `git diff --check`、`git diff --name-only`、`git status --short`
+- Tests:
+  - G1 RED/GREEN：`5 failed, 3 passed` → `8 passed in 0.71s`
+  - G2/G3 GREEN：`7 passed in 0.86s`；合法上传链路 `1 passed`
+  - G4 GREEN：`5 passed in 0.32s`
+  - G5 GREEN：`1 passed`；受影响调用方回归 `8 passed in 1.33s`
+  - 组合回归：`100 passed in 9.12s`
+  - 模块 G 最终：`43 passed in 1.28s`
+  - 首轮全量：`6 failed, 1231 passed in 106.26s (0:01:46)`；除 3 项已知数据库限制外，暴露 3 项旧测试前置/身份问题，修正后定向复验通过
+  - 最终全量汇总原文：`3 failed, 1234 passed in 106.24s (0:01:46)`
+  - 分层依赖：跨模块边 `99`；`service -> service` 跨模块边 `45`、方向 `27`；业务模块强连通分量 `0`。与本批前的 `45` 条基线一致，没有新增跨模块服务依赖
+- Result: **PASS（RMOS-S3-007 模块 G 第二步已指定八项修复范围）/ 环境受限（3 项 PostgreSQL 门禁）**。八项缺陷均有拒绝与放行证据；通过数 1234，达到不低于 1230 的门槛。G-DATA-03 未实现，只保留现状测试登记。
+- Risks/Notes:
+  - G-AUTH：三条读取路由按现有归属口径隔离；同校教师继续可读。`force-submit` 使用既有教师职权守卫并传入会话班级；会话快照无有效班级时教师默认拒绝、管理员仍按既有规则放行，不退回“在任意班教过学生即可”。反馈视角只取令牌角色，请求参数不能升降级
+  - G-DATA：前端调用画像读取时直接期待 200 且没有 404 分支，因此画像不存在时返回不写库的空画像；未新增写接口。无有效证据的客户端自报通过不会创建或提高技能画像，合法证据仍可进入画像
+  - G-EVID：步骤通过要求证据包存在、已封存、有证据项，并同时属于当前学生、会话和步骤；缺失、他人或其他会话证据均判失败且不回显为已接受证据
+  - G-MEM：内存降级键加入用户维度，未改为落库。S1-001 §4.2 对该降级路径“内存合理”的旧判定必须修正：实测已证明旧键可把同一会话的业务数据返回给另一用户
+  - G-KNOW：训练知识检索传入当前用户；同校私有知识可检索，跨校私有知识被排除
+  - 被修改既有断言中，跨用户读取 200、跨班教师强制提交 200、学生查询参数切教师视角、GET 创建画像、无证据通过写画像、任意编号证据通过、内存跨用户读到数据、知识检索不带用户、上传证据不记创建者，均为“测试固化漏洞”；`test_e2e_memory_loop` 的无证据弱项计数也属同类。两个教师流程补 `class_id`、一个活跃会话用例改为查询本人、测试替身补用户参数属于旧测试前置不完整。没有因“生产改错了”而放宽的断言
+  - G-DATA-03（同一学生多条进行中会话使断点续训报错）仍由 `test_active_session_crashes_with_multiple_active_rows_current_behavior` 登记；本批未扩为唯一约束或数据迁移
+  - 最终 3 项失败固定为 `test_audit_query_indexes_exist`、`test_audit_trace_query_explain_uses_trace_index`、`test_skill_registry_migration_gate`；均在连接 `::1:5432` 时由沙箱返回 `PermissionError: [Errno 1] Operation not permitted`
+  - 未新增依赖、迁移或跨模块结构改动；按任务要求未 commit、未 push；最终工作树检查须确认 `data/knowledge_store.json` 未出现在 `git status --short`
+- Next Step: 由董事会复核当前未提交差异；如需补齐 3 项数据库门禁全绿，在无沙箱限制环境原样复跑全量。本记录不自行宣布模块 G、S3、预生产、真机、课堂或生产验收完成。

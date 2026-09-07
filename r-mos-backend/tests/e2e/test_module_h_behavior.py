@@ -1134,7 +1134,7 @@ def _redirect_workbench_storage(monkeypatch, target: Path) -> None:
 def test_workbench_evidence_upload_allows_owner_and_returns_content(
     module_h_env, actors, monkeypatch, tmp_path
 ) -> None:
-    """这是当前行为，疑似缺陷 H-EVID-02：上传生成的证据包未记录创建者和学校，待模块 H 改造时处置。"""
+    """训练证据必须记录上传者，供后续会话归属校验。"""
     client, session_factory = module_h_env
     _redirect_workbench_storage(monkeypatch, tmp_path)
     session_id = asyncio.run(
@@ -1158,7 +1158,7 @@ def test_workbench_evidence_upload_allows_owner_and_returns_content(
             return await session.get(EvidenceBundle, body["evidence_bundle_id"])
 
     bundle = asyncio.run(_load_bundle())
-    assert bundle.created_by_user_id is None
+    assert bundle.created_by_user_id == actors["owner_id"]
     assert bundle.school_name is None
     assert list(tmp_path.rglob("station.jpg")) == []  # 实际文件名带随机前缀
     assert len(list(tmp_path.rglob("*-station.jpg"))) == 1

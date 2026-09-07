@@ -14,7 +14,9 @@ def test_e2e_knowledge_missing(
 ) -> None:
     client, _ = e2e_env
 
-    async def _fake_retrieve_knowledge(self, intent):  # noqa: ANN001
+    async def _fake_retrieve_knowledge(  # noqa: ANN001
+        self, intent, *, viewer_user_id=None
+    ):
         return [{"title": "insufficient", "content": "single doc"}]
 
     monkeypatch.setattr(

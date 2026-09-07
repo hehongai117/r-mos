@@ -211,7 +211,7 @@ def test_teacher_force_submit_requires_scope_and_records_notification_event(
         json={
             "user_id": student_id,
             "project_id": f"proj-{uuid4().hex[:8]}",
-            "project_snapshot": {"estimated_time": 20},
+            "project_snapshot": {"class_id": class_id, "estimated_time": 20},
         },
     )
     assert session_resp.status_code == 200

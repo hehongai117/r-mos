@@ -1047,10 +1047,17 @@ def test_force_submit_teacher_no_scope_returns_403(monkeypatch) -> None:
     try:
         data = _seed_training_data(sf)
 
-        async def _fake_no_scope(self, teacher_id, student_id):
-            return False
+        async def _fake_no_scope(*args, **kwargs):
+            raise training_endpoints.HTTPException(
+                status_code=403,
+                detail="Teacher has no scope for this student",
+            )
 
-        monkeypatch.setattr(training_endpoints.ClassMembershipService, "teacher_has_student_scope", _fake_no_scope)
+        monkeypatch.setattr(
+            training_endpoints,
+            "ensure_teacher_scope_over_student",
+            _fake_no_scope,
+        )
 
         resp = client.post(
             f"/api/v1/training/sessions/{data['session_id']}/force-submit",
@@ -1071,8 +1078,8 @@ def test_force_submit_success_records_audit_event(monkeypatch) -> None:
     try:
         data = _seed_training_data(sf)
 
-        async def _fake_has_scope(self, teacher_id, student_id):
-            return True
+        async def _fake_has_scope(*args, **kwargs):
+            return None
 
         async def _fake_submit_by_teacher(self, session_id, teacher_id):
             return SimpleNamespace(
@@ -1083,7 +1090,11 @@ def test_force_submit_success_records_audit_event(monkeypatch) -> None:
                 payload={"score": 75.0},
             )
 
-        monkeypatch.setattr(training_endpoints.ClassMembershipService, "teacher_has_student_scope", _fake_has_scope)
+        monkeypatch.setattr(
+            training_endpoints,
+            "ensure_teacher_scope_over_student",
+            _fake_has_scope,
+        )
         monkeypatch.setattr(training_endpoints.SubmissionService, "submit_by_teacher", _fake_submit_by_teacher)
 
         resp = client.post(
@@ -1108,13 +1119,17 @@ def test_force_submit_submit_failed_returns_400(monkeypatch) -> None:
     try:
         data = _seed_training_data(sf)
 
-        async def _fake_has_scope(self, teacher_id, student_id):
-            return True
+        async def _fake_has_scope(*args, **kwargs):
+            return None
 
         async def _fake_submit_none(self, session_id, teacher_id):
             return None
 
-        monkeypatch.setattr(training_endpoints.ClassMembershipService, "teacher_has_student_scope", _fake_has_scope)
+        monkeypatch.setattr(
+            training_endpoints,
+            "ensure_teacher_scope_over_student",
+            _fake_has_scope,
+        )
         monkeypatch.setattr(training_endpoints.SubmissionService, "submit_by_teacher", _fake_submit_none)
 
         resp = client.post(
@@ -1285,7 +1300,7 @@ def test_get_active_session_not_found_returns_404() -> None:
     """GET /training/users/{user_id}/active-session — 无活跃会话时返回 404（覆盖 lines 893-897）."""
     client, sf = _build_client()
     try:
-        resp = client.get("/api/v1/training/users/99999/active-session")
+        resp = client.get("/api/v1/training/users/1/active-session")
         assert resp.status_code == 404
         body = resp.json()
         assert body["message"] == "No active session found"

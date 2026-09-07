@@ -24,6 +24,7 @@ from app.services.evidence_service import EvidenceService
 from app.services.llm import LLMProvider, llm_router
 from app.services.training.session_service import SessionService
 from app.services.training.submission_service import SubmissionService
+from app.services.training.evidence_validation import is_valid_training_step_evidence
 from app.services.user_preference_service import UserPreferenceService
 
 
@@ -86,7 +87,8 @@ class TrainingWorkbenchExecutionService:
                         machine_tags=[session_id, step_id, filename],
                     )
                 ],
-            )
+            ),
+            created_by_user_id=user_id,
         )
 
         return {
@@ -127,7 +129,14 @@ class TrainingWorkbenchExecutionService:
             if str(tool.get("status", "")).upper() == "ANOMALY"
         ]
         missing_critical = sorted(tool_id for tool_id in critical_ids if tool_id not in confirmed_ids)
-        has_evidence = bool(evidence_bundle_id)
+        has_evidence = await is_valid_training_step_evidence(
+            self.db,
+            bundle_id=evidence_bundle_id,
+            user_id=user_id,
+            session_id=session_id,
+            step_id=step_id,
+        )
+        accepted_evidence_bundle_id = evidence_bundle_id if has_evidence else None
         passed = has_evidence and not missing_critical and not anomaly_ids
 
         summary = (
@@ -140,7 +149,7 @@ class TrainingWorkbenchExecutionService:
             step_meta=step_meta,
             note=note,
             tools_confirmed=tools_confirmed,
-            evidence_bundle_id=evidence_bundle_id,
+            evidence_bundle_id=accepted_evidence_bundle_id,
             passed=passed,
             missing_critical=missing_critical,
             anomaly_ids=anomaly_ids,
@@ -152,7 +161,7 @@ class TrainingWorkbenchExecutionService:
             "details": details,
             "missing_critical_tools": missing_critical,
             "anomaly_tools": anomaly_ids,
-            "evidence_bundle_id": evidence_bundle_id,
+            "evidence_bundle_id": accepted_evidence_bundle_id,
         }
 
         record_id = await self.session_service.update_step(
@@ -163,7 +172,7 @@ class TrainingWorkbenchExecutionService:
             attempt_count=(record.attempt_count if record else 0) + 1,
             tools_confirmed=tools_confirmed,
             evidence={
-                "bundle_id": evidence_bundle_id,
+                "bundle_id": accepted_evidence_bundle_id,
                 "note": note,
             },
             verdict_result=verdict,
@@ -194,7 +203,7 @@ class TrainingWorkbenchExecutionService:
             "next_step_id": next_step_id,
             "session_submitted": session_submitted,
             "feedback": feedback,
-            "evidence_bundle_id": evidence_bundle_id,
+            "evidence_bundle_id": accepted_evidence_bundle_id,
         }
 
     async def ask_follow_up(

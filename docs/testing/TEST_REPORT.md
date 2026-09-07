@@ -570,3 +570,28 @@
 - 分层依赖重测：最终 `service -> service` 跨模块边 `45`、方向 `27`，业务模块强连通分量 `0`；与改前基线一致，没有新增跨模块 service→service 边
 - Failure Handling：实现中间态曾使 service→service 增至 46，立即将审计组合移回接口层后恢复 45；扩大回归 7 项失败是直接函数调用缺 Request，补真实测试前置且不改断言；历史跨校绑定新增 RED 后补列表统一过滤。最终 3 项失败固定为两个审计索引门禁和技能迁移门禁，均因沙箱禁止连接 `::1:5432`
 - Result：**PASS（RMOS-S3-006 模块 B 第二步 G1-G3 软件行为范围）/ 环境受限（3 项 PostgreSQL 门禁）**。通过数达到 1191；不代表模块 B、S3、预生产、真机、课堂或生产验收已通过。
+
+### RMOS-S3-007-G-FIX｜模块 G 第二步九类缺陷处置
+
+- Test ID / 门禁编号：`G-AUTH-01/02/03`、`G-DATA-01/02/03`、`G-EVID-01`、`G-MEM-01`、`G-KNOW-01`；其中 G-DATA-03 仅登记，未实现
+- 提交：以 `8de4b6ac73823b3691d41016786e06f7fca9770e` 为基线的未提交工作树；分支 `audit/phase3-auth-control-realtime`。按用户要求未 commit、未 push
+- 执行环境：指定 worktree 的 `r-mos-backend`；解释器 `/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python`；加载主工作区 `.env` 后执行 `unset CORS_ORIGINS; export DEBUG=true`
+- 拒绝与放行证据：
+  - G1：跨校学生会话、步骤、活跃会话均 404，同校教师均 200；学生不能使用参数切换教师反馈，教师也不能用参数降级；学生本人和非会话班级教师不能强制提交，会话班级教师可以。会话无班级时，即便教师在其他班教过该学生也拒绝
+  - G2：读取不存在画像返回 200 空画像且数据库仍无记录，直接写接口仍为 405；无有效证据的自报通过不创建画像，合法证据通过后画像正常创建并记分
+  - G3：不存在、他人、其他会话证据均不能判通过；属于当前学生、会话、步骤且完整封存的证据可判通过
+  - G4：同一会话的内存降级数据仅原用户可读，另一用户得到空结果；未改为落库
+  - G5：训练生成器能检索同校私有知识，同时排除跨校私有知识
+- 设计依据：画像前端调用方直接消费 200 响应且没有 404 处理，因此选用“空画像视图、不写数据库”，没有新增创建接口。训练会话没有独立班级字段，只能从项目快照取有效班级；取不到时采用默认拒绝，避免退回任意班级关系放行
+- S1-001 §4.2 修正：原“Redis 降级时使用进程内内存是合理的”只判断了介质，没有验证隔离键。实测证明旧键可跨用户返回同一会话数据；该结论应改为“可保留内存降级，但键必须同时包含用户和会话”，本批已按此修正
+- 被修改既有断言分类：跨用户读取、跨班强制提交、参数切换反馈视角、GET 写画像、无证据写画像、假证据判通过、跨用户内存读取、知识检索无用户边界、上传证据无创建者，全部为“测试固化漏洞”；无证据弱项统计同属该类。两处教师流程补班级、活跃会话查询改为本人、测试替身补用户参数属于测试前置修正，原业务要求未放宽。没有“生产改错了”而修改的断言
+- Commands：
+  - 组合回归：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings tests/e2e/test_module_g_behavior.py tests/e2e/test_e2e_memory_loop.py tests/e2e/test_e2e_knowledge_missing.py tests/unit/test_project_generator.py tests/unit/test_training_characterization.py tests/unit/test_training_workbench_execution_api.py`
+  - 模块 G：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings tests/e2e/test_module_g_behavior.py`
+  - 全量：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python -m pytest -p no:warnings`（未加 `-q`、未加 `--timeout`）
+  - 依赖：`/Users/xuhehong/Desktop/r-mos/r-mos-backend/venv/bin/python ../docs/governance/evidence/2026-09-05-layered-dependency-measure.py`
+- Tests / 关键原始输出：组合回归 `100 passed in 9.12s`；模块 G `43 passed in 1.28s`；全量汇总原文 `3 failed, 1234 passed in 106.24s (0:01:46)`
+- 分层依赖重测：跨模块边 `99`；`service -> service` 跨模块边 `45`、方向 `27`；业务模块强连通分量 `0`。与本批前基线一致，没有新增跨模块 `service -> service` 边
+- G-DATA-03：同一学生多条进行中会话导致断点续训报错仍由现状用例登记；本批没有加入唯一约束、迁移或跨模块处置
+- Failure Handling：首轮全量 `6 failed, 1231 passed`，其中 3 项为预期沙箱数据库失败；其余 3 项均为旧测试缺少会话班级、沿用查询参数切教师视角或仍期待上传证据无创建者。修正测试前置与漏洞断言后定向通过，第二次全量只剩固定 3 项数据库失败
+- Result：**PASS（RMOS-S3-007 模块 G 第二步已指定八项修复范围）/ 环境受限（3 项 PostgreSQL 门禁）**。通过数 1234，达到不低于 1230 的门槛；不代表 G-DATA-03、模块 G、S3、预生产、真机、课堂或生产验收已完成。

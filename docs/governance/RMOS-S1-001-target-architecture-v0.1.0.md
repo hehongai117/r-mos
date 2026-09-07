@@ -276,7 +276,8 @@ I → C        O → G
 
 | 单例 | 判定 |
 |---|---|
-| `manager`（WebSocket 连接）、`memory_hub` 的 Redis fallback、`login_throttle` | **内存合理**。连接天然绑进程；fallback 本就是降级路径；限流在单实例下可接受 |
+| `manager`（WebSocket 连接）、~~`memory_hub` 的 Redis fallback~~、`login_throttle` | **内存合理**。连接天然绑进程；限流在单实例下可接受 |
+| `memory_hub` 的 Redis fallback | ⚠️ **该判定已被实测推翻**（S3-07 模块 G，缺陷 G-MEM-01）：它不只是缓存，**会向另一 `user_id` 返回同一会话的业务数据**。已在模块 G 修复——降级键加用户维度隔离，**未改成落库**（落库属 M-19 整体处置）。判定更正为：**内存可接受，但键必须带用户维度** |
 | `orchestrator`、`orchestrator_v2`、`multi_agent_coordinator`、`evidence_enforcer` | **持业务状态，应落库**。归模块 **I**，其数据归属已在 §2.1 明确（`commands`／`ai_tool_calls`／`agent_runtime_snapshots` 等表已存在，正是当前无写入路径的那几张） |
 
 > 注意 `orchestrator_v2._trace_owner_user_ids`（第 18 批新增）扩大了该状态面，

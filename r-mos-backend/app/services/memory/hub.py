@@ -78,6 +78,12 @@ class MemoryHub:
         self.short_term = ShortTermMemory()
         self.long_term = LongTermMemory()
 
+    @staticmethod
+    def _short_term_key(session_id: str, user_id: Optional[str]) -> str:
+        """内存/Redis 降级键必须同时包含用户和会话维度。"""
+        user_scope = str(user_id) if user_id is not None else "anonymous"
+        return f"user:{user_scope}:session:{session_id}"
+
     async def read(
         self,
         session_id: str,
@@ -100,7 +106,7 @@ class MemoryHub:
         entries = []
 
         # 1. 从 Redis 读取短期记忆
-        short_data = self.short_term.read(session_id)
+        short_data = self.short_term.read(self._short_term_key(session_id, user_id))
         if short_data:
             entries.append(MemoryEntry(
                 source="short_term",
@@ -156,7 +162,7 @@ class MemoryHub:
         success = True
 
         # 1. 写入 Redis (短期记忆)
-        if not self.short_term.write(session_id, data):
+        if not self.short_term.write(self._short_term_key(session_id, user_id), data):
             success = False
             logger.warning("Failed to write short-term memory")
 
@@ -180,6 +186,7 @@ class MemoryHub:
         self,
         session_id: str,
         entry: dict,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         追加记忆条目 (短期)
@@ -191,7 +198,7 @@ class MemoryHub:
         Returns:
             是否成功
         """
-        return self.short_term.append(session_id, entry)
+        return self.short_term.append(self._short_term_key(session_id, user_id), entry)
 
     async def clear(
         self,
@@ -213,7 +220,7 @@ class MemoryHub:
         success = True
 
         # 清除短期记忆
-        if not self.short_term.delete(session_id):
+        if not self.short_term.delete(self._short_term_key(session_id, user_id)):
             success = False
 
         # 清除长期记忆 (可选)
